@@ -1,0 +1,251 @@
+---
+title: "Milestone Report"
+author: "David Gonzalez"
+date: "2024-06-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(knitr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+library(wordcloud)
+library(textstem)
+```
+
+## Executive Summary
+
+The aim of this project is to produce a next-word prediction algorithm using R, which will be implemented in a Shiny app. The app will predict the user's next word based on text inputed by them. 
+
+The algorithm will be trained on a corpora collected from public sources, made available as part of this Course's materials.
+
+In this milestone report, I provide a summary of the data and outline plans for creating the algorithm and the app.
+
+
+## Data Summary
+
+The algorithm will be trained on text from three files, each corresponding to a different type of text: blogs, news articles, and twitter posts. 
+
+The table below provides a summary of each file's size and number of words and lines.
+```{r count_words_lines, cache = TRUE, include = FALSE}
+# Define the file names
+file_names <- c("data/en_US/en_US.blogs.txt", "data/en_US/en_US.news.txt", "data/en_US/en_US.twitter.txt")
+
+# Initialize vectors to store word counts, line counts, and file sizes
+word_counts <- numeric(length(file_names))
+line_counts <- numeric(length(file_names))
+file_sizes <- numeric(length(file_names))
+
+# Loop through each file and calculate word counts, line counts, and file sizes
+for (i in seq_along(file_names)) {
+  file_path <- file_names[i]
+  
+  # Read the file content
+  lines <- read_lines(file_path)
+  
+  # Count the number of lines
+  line_counts[i] <- length(lines)
+  
+  # Count the number of words
+  word_counts[i] <- sum(str_count(lines, "\\S+"))
+  
+  # Get the file size in bytes and convert to megabytes
+  file_sizes[i] <- file.size(file_path) / (1024 * 1024)
+}
+
+
+# Create a tibble with the results
+file_stats <- tibble(
+  "File Name" = file_names,
+  "Word Count" = word_counts,
+  "Line Count" = line_counts,
+  "File Size (MB)" = file_sizes
+)
+
+file_stats$`Word Count` <- formatC(file_stats$`Word Count`, format = "d", big.mark = ",")
+file_stats$`Line Count` <- formatC(file_stats$`Line Count`, format = "d", big.mark = ",")
+file_stats$`File Size (MB)` <- formatC(file_stats$`File Size (MB)`, format = "f", digits = 2, big.mark = ",")
+
+```
+
+
+```{r display_summary_table, echo = FALSE}
+
+# Display the table using knitr::kable
+kable(file_stats, caption = "File Statistics")
+```
+
+Due to the size of the files, the exploratory data analysis presented here is based on a sample: 10,000 lines were drawn randomly from each file and combined to form a sample file of 30,000 lines. A [list of profane terms](https://www.cs.cmu.edu/~biglou/resources/bad-words.txt) was then used to remove profanity from the combined sample. I then applied three tokenization processes to the data, creating files of single words, bigrams and trigrams. The single word file drawn from the 30,000 lines of text contains 877,314 words.
+
+The histogram and word cloud below respectively display the 50 and 250 most popular words in the sample. Unsurprisingly, the five most frequent words in the sample are "the", "to", "and", "a", and "of".
+
+```{r single_word_stats, cache = TRUE, echo = FALSE}
+#SINGLE WORDS
+# load the data
+word_sample <- tibble(word = readLines("data/word_sample.txt"))
+#calculate word frequencies
+word_frequencies <- word_sample %>% count(word, sort = TRUE)
+word_frequencies <- word_frequencies %>% 
+        mutate(share = round(n / nrow(word_sample) * 100,2))
+# plot the n most frequent words
+top_n <- 50
+top_words <- word_frequencies %>% head(top_n)
+ggplot(top_words, aes(x=reorder(word,share), y = share)) + 
+        geom_bar(stat = "identity") + 
+        coord_flip() + labs(title = paste(top_n, "Most Frequent Words in Sample"),
+                            x = "Words", y = "Relative Frequency") + theme_minimal()
+#create a word cloud
+set.seed(1)
+wordcloud(words = word_frequencies$word, freq = word_frequencies$n,
+          max.words = 250, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+The following graph displays, in blue, the number of unique words that must be included in a "dictionary" to cover different percentages of word instances in the sample. For example, with a dictionary of just 2,500 words, we cover around 80% of word instances in our list of 877,314 words. If we use a dictionary of lemmatized words - that is, if we group all the inflected forms of a word into a single root word - we can see, in the gold curve, that coverage rises for any number of unique words included. For example, with a dictionary of 2,500 root or lemmatized words we now obtain over 85% of coverage against the previous 80%.
+
+```{r word_coverage, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE}
+#Dictionary coverage in sample
+total_words <- sum(word_frequencies$n)
+#calculate cumulative frequencies
+word_frequencies <- word_frequencies %>% 
+        mutate(cumulative_freq = cumsum(n), 
+               cumulative_pct = cumulative_freq/total_words * 100)
+#graph coverage by number of words
+library(scales)
+
+plot <- ggplot(word_frequencies, aes(x = seq_along(word), y = cumulative_pct)) +
+  geom_line(aes(color = "Original Words"), size = 1.2) +  # Label for legend
+  labs(title = "Cumulative Coverage of Word Instances",
+    x = "Number of Unique Words Included",
+    y = "Cumulative Frequency of Word Instances") +
+  theme_minimal() +
+  scale_x_continuous(labels = comma, limits = c(0, 10000)) +  # Apply commas
+  scale_y_continuous(breaks = seq(0, 100, by = 10)) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+word_sample <- word_sample %>% mutate(word_lemmatized = lemmatize_words(word))
+
+#calculate lemmatized word frequencies
+lemmatized_frequencies <- word_sample %>% count(word_lemmatized, sort = TRUE)
+lemmatized_frequencies <- lemmatized_frequencies %>% mutate(share = round(n / nrow(word_sample) * 100,2))
+
+#Dictionary coverage in sample
+total_lemmatized <- sum(lemmatized_frequencies$n)
+#calculate cumulative frequencies
+lemmatized_frequencies <- lemmatized_frequencies %>% mutate(cumulative_freq = cumsum(n), cumulative_pct = cumulative_freq/total_lemmatized * 100)
+
+plot + 
+  geom_line(data = lemmatized_frequencies, 
+            aes(x = seq_along(word_lemmatized), 
+                y = cumulative_pct, 
+                color = "Lemmatized Words"), 
+            size = 1.2) +
+  scale_color_manual(values = c("Original Words" = "#0072B2", 
+                                "Lemmatized Words" = "#E69F00")) +
+  labs(color = "Dictionary")  # Customize legend title
+
+```
+
+Finally, I checked how many of the words present in the sample are not contained in an external english dictionary sourced [here](https://github.com/dwyl/english-words/blob/master/words.txt). As the table below shows, around 3.7% of all words in the sample are not in a dictionary. Visual inspection shows that these missing words include "modern" terms related to the internet (like blog or html), names of companies and brands, unusual last names, and foreign words. 
+
+```{r dictionary_check, echo = FALSE, cache = TRUE, warning = FALSE, message= FALSE}
+dictionary_file <- "data/words.txt"
+english_dictionary <- tibble(word = readLines(dictionary_file))
+#create temporary lowercase columns for comparison
+word_sample <- word_sample %>%
+        mutate(word_lower = tolower(word))
+english_dictionary <- english_dictionary %>%
+        mutate(word = tolower(word))
+# Create a new column that removes possessive forms in the sample
+word_sample <- word_sample %>%
+        mutate(word_stripped = gsub("'s$", "", word_lower)) %>% 
+        select(-word_lower)
+english_dictionary <- english_dictionary %>%
+        mutate(word_stripped = gsub("'s$", "", word)) %>% select(-word)
+#keep only unique entries of dictionary (after removing caps and possessives)
+english_dictionary <- tibble(word_stripped = unique(english_dictionary$word_stripped))
+# initiate column in dictionary stating that word is in dictionary (will be used when joined with sample)
+english_dictionary <- english_dictionary %>% mutate(on_dictionary = TRUE)
+#perform left join to identify words in sample as on or off dictionary
+word_sample <- word_sample %>% left_join(english_dictionary, by = "word_stripped") %>% 
+        mutate(on_dictionary = ifelse(is.na(on_dictionary),FALSE,TRUE)) %>%
+        select(-word_stripped)
+#summarize words in and out of dictionary
+table(word_sample$on_dictionary)/877314
+```
+
+We can also see the most common bigrams and trigrams:
+```{r bigrams, echo = FALSE, cache = TRUE, warning = FALSE, message= FALSE}
+#load the data
+bigrams <- tibble(bigram = readLines("data/bigram_sample.txt"))
+#calculate bigram frequencies
+bigram_frequencies <- bigrams %>% count(bigram, sort = TRUE)
+bigram_frequencies <- bigram_frequencies %>% mutate(share = round(n/nrow(bigrams) * 100, 2))
+# plot the n most frequent bigrams
+top_n_bigrams <- 20
+top_bigrams <- bigram_frequencies %>% head(top_n_bigrams)
+#plot the top bigrams
+ggplot(top_bigrams, aes(x = reorder(bigram, share), y = share)) +
+        geom_bar(stat = "identity") +
+        coord_flip() +
+        labs(title = paste(top_n_bigrams, "Most Frequent Bigrams"),
+             x = "Bigrams",
+             y = "Relative Frequency") +
+        theme_minimal()
+#TRIGRAMS
+#load the data
+trigrams <- tibble(trigram = readLines("data/trigram_sample.txt"))
+#calculate trigram frequencies
+trigram_frequencies <- trigrams %>% count(trigram, sort = TRUE)
+trigram_frequencies <- trigram_frequencies %>% mutate(share = round(n/nrow(trigrams) * 100, 3))
+# plot the n most frequent trigrams
+top_n_trigrams <- 20
+top_trigrams <- trigram_frequencies %>% head(top_n_trigrams)
+#plot the top trigrams
+ggplot(top_trigrams, aes(x = reorder(trigram, share), y = share)) +
+        geom_bar(stat = "identity") +
+        coord_flip() +
+        labs(title = paste(top_n_bigrams, "Most Frequent Trigrams"),
+             x = "Trigrams",
+             y = "Relative Frequency") +
+        theme_minimal()
+
+
+```
+
+Note that the NA term in the trigram graph simply indicates that it is relatively common for some lines to contain less than three words. 
+
+## Algorithm Modeling
+
+### Building the Basic N-gram model
+The model will be trained on a sample drawn from the three text files. The key steps are: 
+- Pre-processing: like the data used in this report for exploratory analysis, the training text data will be pre-processed to remove punctuation, numbers, profanity and stop words. 
+- Tokenization: Using the tokenizers package, the text will be split into n-grams (from n=1 to n=4).
+- Frequency/probability calculation: we'll calculate frequency counts of n-grams, and convert them into conditional probabilities that indicate how likely each n-gram is given the words that came before. 
+- Store the n-gram probability model in a data.table structure. Each n-gram level will be a separate table with columns for the n-gram components and their probabilties.
+- Indexing: ensure fast retrieval of n-grams during prediction by setting keys in the data.table structures.
+- Pruning: implement a pruning step to remove low-frequency n-grams (below a certain threshold) to reduce the size of the model.
+- Normalization: ensure that the probabilities for each context sum to 1.
+
+### Handling Unseen N-grams
+The algorithm will use a backoff model to estimate the probability of an n-gram when it is not observed in the training data. The idea is to back off to shorter, more frequent n-grams if the longer ones are not found. This is done by:
+1) starting with the highest-order n-gram in our model (trigram for a three-word context, for example). If the trigram is found, use its probability.
+2) back off to lower-order n-grams: if the trigram is not found, back off to the bigram. If the bigram is found, use its probability.
+3) fall back to unigrams: if the bigram is not found, use the unigram probability as the finall fallback.
+4) normalization: after obtaining the probability from the highest available n-gram, ensure that the probabilities are normalized to sum to 1.
+5) applying smoothing techniques, like the Kneser-Ney Smoothing method, which adjusts the probability based on the frequency of lower-order n-grams, ensuring that even rare n-grams receive non-zero probability.
+
+### Efficient Storage using Markov Chains
+The n-grams will be stored as a Markov chain where each state represents a word or a sequence of words, and transitions represent the probability of moving from one state to another.
+
+### How Many Parameters
+Using longer n-grams can capture more context, but increases model size and complexity. I will start with tetragrams, and adjust if the model is too slow or large.
+
+### Evaluating Performance
+The original corpora will be used to create training and test sets. A perplexity calculation and accuracy metrics will then be used to compare predicted words against words actual words in the test set.
+
