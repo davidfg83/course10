@@ -22,23 +22,16 @@ twitter <- readLines(twitter_file, skipNul = TRUE)
 #create full dataset
 corpora <- c(blogs,news,twitter)
 
-#To create training and testing samples:
+#To create training sample:
 
 #define size of samples
-n <- 200000
-n_training <- .75*n
-
+n <- 100000
 #set seed for reproducibility
 set.seed(123)
-#draw working corpora
-working_corpora <- sample(corpora, n)
+#draw training corpora
+training <- sample(corpora, n)
 #remove heavy files no longer needed from workspace
 rm(blogs, news, twitter, corpora)
-
-#sample n=training_size lines for the training set
-train_indices <- sample(length(working_corpora), n_training)
-training <- working_corpora[train_indices]
-testing <- working_corpora[-train_indices]
 
 #Pre-process the data
 
@@ -108,11 +101,12 @@ for (pattern in patterns_to_remove) {
         training_corpus <- tm_map(training_corpus, toSpace, pattern)
 }
 
-#training <- tm_map(training, removeWords, stopwords("english"))
 # Text stemming and eliminating extra white spaces
 training_corpus <- tm_map(training_corpus, stripWhitespace)
 training_corpus <- tm_map(training_corpus, stemDocument)
 
+#Split training corpus into 2 versions: with and without top words
+training_corpus_no_stop <- tm_map(training_corpus, removeWords, stopwords("english"))
 
 #read in profanity list
 #profanity_words <- readLines("data/profanity_list.txt")
@@ -127,13 +121,14 @@ training_corpus <- tm_map(training_corpus, stemDocument)
 #training_corpus <- tm_map(training_corpus, remove_profanity, profanity_pattern)
 
 # Convert corpus to character vector
+training_text_no_stop <- sapply(training_corpus_no_stop, as.character)
 training_text <- sapply(training_corpus, as.character)
 
-# Sample 2% of the corpus for co-occurrence analysis
+# Sample 2% of the corpus without stop words for co-occurrence analysis
 set.seed(42)  # For reproducibility
-sample_size <- floor(0.02 * length(training_text))
-sample_indices <- sample(seq_len(length(training_text)), size = sample_size)
-sampled_text <- training_text[sample_indices]
+sample_size <- floor(0.02 * length(training_text_no_stop))
+sample_indices <- sample(seq_len(length(training_text_no_stop)), size = sample_size)
+sampled_text <- training_text_no_stop[sample_indices]
 
 # Create a document-term matrix
 dtm_sample <- DocumentTermMatrix(Corpus(VectorSource(sampled_text)))
@@ -155,22 +150,22 @@ create_ngrams <- function(text, n) {
         tokenize_ngrams(text, n = n, simplify = TRUE)
 }
 # Create n-grams
+#unigrams include stop words
 unigrams <- create_ngrams(training_text, 1)
+#bigrams including stop words
 bigrams <- create_ngrams(training_text, 2)
-trigrams <- create_ngrams(training_text, 3)
-fourgrams <- create_ngrams(training_text, 4)
-
+#bigrams without stop words
+bigrams_no_stop  <- create_ngrams(training_text_no_stop,2) 
 # Convert n-grams to tibbles for easier manipulation
 unigrams_tbl <- tibble(ngram = unlist(unigrams))
 bigrams_tbl <- tibble(ngram = unlist(bigrams))
-trigrams_tbl <- tibble(ngram = unlist(trigrams))
-fourgrams_tbl <- tibble(ngram = unlist(fourgrams))
+bigrams_no_stop_tbl <- tibble(ngram = unlist(bigrams_no_stop))
 
 #remove n-gram corpus docs
-rm(unigrams, bigrams, trigrams, fourgrams)
+rm(unigrams, bigrams, bigrams_no_stop)
 
 # Prune n-grams with a low frequency threshold
-frequency_threshold <- 2
+frequency_threshold <- 3
 
 # Calculate frequency of n-grams, create context columns, and calculate conditional probs by context
 unigrams_tbl <- unigrams_tbl %>%
@@ -187,133 +182,95 @@ bigrams_tbl <- bigrams_tbl %>%
         mutate(prob = (freq + 1) / (sum(freq) + n())) %>%  # Add-1 smoothing
         ungroup()
 
-trigrams_tbl <- trigrams_tbl %>%
+bigrams_no_stop_tbl <- bigrams_no_stop_tbl %>%
         count(ngram, name = "freq") %>%
         filter(freq >= frequency_threshold) %>%
         distinct(ngram, .keep_all = TRUE) %>%
-        mutate(context = paste(word(ngram, 1), word(ngram, 2))) %>%
+        mutate(context = word(ngram, 1)) %>%
         group_by(context) %>%
         mutate(prob = (freq + 1) / (sum(freq) + n())) %>%  # Add-1 smoothing
         ungroup()
 
-fourgrams_tbl <- fourgrams_tbl %>%
-        count(ngram, name = "freq") %>%
-        filter(freq >= frequency_threshold) %>%
-        distinct(ngram, .keep_all = TRUE) %>%
-        mutate(context = paste(word(ngram, 1), word(ngram, 2), word(ngram, 3))) %>%
-        group_by(context) %>%
-        mutate(prob = (freq + 1) / (sum(freq) + n())) %>%  # Add-1 smoothing
-        ungroup()
-
-# Function to predict the next word using a backoff model with Add-1 (Laplace) Smoothing and co-occurrence
-predict_next_word <- function(sentence, unigrams_tbl, bigrams_tbl, trigrams_tbl, fourgrams_tbl, co_occurrence_df) {
-        # Preprocess the input sentence to match the training data
+# Define a function using a backoff model to offer 6 suggestions: 2 from bigrams without stop words, 2 from the bigrams with stop words, 2 from the co-occurrence matrix. 
+predict_next_word <- function(sentence, unigrams_tbl, bigrams_tbl, bigrams_no_stop_tbl, co_occurrence_df) {
+        # Preprocess the sentence
         sentence <- tolower(sentence)
         sentence <- gsub("[[:digit:]]", "", sentence)
         sentence <- gsub("[[:punct:]]", "", sentence)
         sentence <- gsub("\\s+", " ", sentence)
         sentence <- trimws(sentence)
+        sentence_corpus <- Corpus(VectorSource(sentence)) #convert to corpus for stemming
+        sentence_corpus <- suppressWarnings(tm_map(sentence_corpus,stemDocument)) #stemming
+        sentence <- sapply(sentence_corpus, as.character)
         
         # Split the sentence into words
         words <- unlist(strsplit(sentence, " "))
         num_words <- length(words)
         
-        # Initialize prediction variable
-        prediction <- NA
-        found <- FALSE
+        suggestions <- character(0)
         
-        # Initialize a data frame to store the next word candidates and their probabilities
-        next_word_probs <- data.frame(word = character(), prob = numeric(), stringsAsFactors = FALSE)
-        
-        # Check for 4-gram, trigram, and bigram contexts
-        if (num_words >= 3) {
-                last_three_words <- paste(words[(num_words-2):num_words], collapse = " ")
-                possible_fourgrams <- fourgrams_tbl %>%
-                        filter(context == last_three_words) %>%
-                        select(ngram, prob)
-                
-                if (nrow(possible_fourgrams) > 0) {
-                        possible_fourgrams <- possible_fourgrams %>%
-                                mutate(word = word(ngram, 4)) %>%
-                                select(word, prob)
-                        
-                        next_word_probs <- rbind(next_word_probs, possible_fourgrams)
-                        found <- TRUE
-                }
-        }
-        
-        if (!found && num_words >= 2) {
-                last_two_words <- paste(words[(num_words-1):num_words], collapse = " ")
-                possible_trigrams <- trigrams_tbl %>%
-                        filter(context == last_two_words) %>%
-                        select(ngram, prob)
-                
-                if (nrow(possible_trigrams) > 0) {
-                        possible_trigrams <- possible_trigrams %>%
-                                mutate(word = word(ngram, 3)) %>%
-                                select(word, prob)
-                        
-                        next_word_probs <- rbind(next_word_probs, possible_trigrams)
-                        found <- TRUE
-                }
-        }
-        
-        if (!found && num_words >= 1) {
+        if (num_words >= 1) {
                 last_word <- words[num_words]
-                possible_bigrams <- bigrams_tbl %>%
+                
+                # 1. Try to find suggestions from bigrams_no_stop_tbl
+                bigrams_no_stop_suggestions <- bigrams_no_stop_tbl %>%
                         filter(context == last_word) %>%
-                        select(ngram, prob)
-                
-                if (nrow(possible_bigrams) > 0) {
-                        possible_bigrams <- possible_bigrams %>%
-                                mutate(word = word(ngram, 2)) %>%
-                                select(word, prob)
-                        
-                        next_word_probs <- rbind(next_word_probs, possible_bigrams)
-                        found <- TRUE
-                }
-        }
-        
-        # If no n-gram match is found, use co-occurrence
-        if (!found) {
-                co_occurrence_candidates <- co_occurrence_df %>%
-                        filter(term1 %in% words | term2 %in% words) %>%
-                        group_by(word = if_else(term1 %in% words, term2, term1)) %>%
-                        summarize(prob = sum(Freq)) %>%
-                        arrange(desc(prob))
-                
-                if (nrow(co_occurrence_candidates) > 0) {
-                        next_word_probs <- rbind(next_word_probs, co_occurrence_candidates)
-                        found <- TRUE
-                }
-        }
-        
-        # If no matches are found in n-grams or co-occurrence, use the most frequent unigrams as fallback
-        if (!found) {
-                fallback_unigrams <- unigrams_tbl %>%
                         arrange(desc(prob)) %>%
-                        select(word = ngram, prob) %>%
-                        head(10)  # Top 10 most frequent unigrams as fallback
+                        head(2) %>%
+                        pull(ngram) %>%
+                        word(2)
                 
-                next_word_probs <- rbind(next_word_probs, fallback_unigrams)
+                suggestions <- unique(c(suggestions, bigrams_no_stop_suggestions))
+                
+                # 2. Try to find suggestions from bigrams_tbl
+                bigrams_suggestions <- bigrams_tbl %>%
+                        filter(context == last_word) %>%
+                        arrange(desc(prob)) %>%
+                        head(2) %>%
+                        pull(ngram) %>%
+                        word(2)
+                
+                suggestions <- unique(c(suggestions, bigrams_suggestions))
         }
         
-        # Aggregate probabilities for the same word
-        next_word_probs <- next_word_probs %>%
-                group_by(word) %>%
-                summarize(prob = sum(prob)) %>%
-                arrange(desc(prob))
+        # 3. Try to find suggestions from co_occurrence_df
+        co_occurrence_suggestions <- co_occurrence_df %>%
+                filter(term1 %in% words | term2 %in% words) %>%
+                arrange(desc(Freq)) %>%
+                head(2) %>%
+                mutate(word = if_else(term1 %in% words, term2, term1)) %>%
+                pull(word)
         
-        top_words <- next_word_probs %>% top_n(3, wt = prob) %>% pull(word)
+        suggestions <- unique(c(suggestions, co_occurrence_suggestions))
         
-        # Remove any names that were inadvertently set
-        names(top_words) <- NULL
+        # Remove invalid suggestions (e.g., digits, NA, empty strings)
+        suggestions <- suggestions[!is.na(suggestions) & suggestions != "" & !grepl("[[:digit:]]", suggestions)]
         
-        return(top_words)
+        # 4. If fewer than 6 suggestions, fill with unigrams_tbl
+        if (length(suggestions) < 6) {
+                unigram_suggestions <- unigrams_tbl %>%
+                        arrange(desc(prob)) %>%
+                        head(6 - length(suggestions)) %>%
+                        pull(ngram)
+                
+                suggestions <- unique(c(suggestions, unigram_suggestions))
+        }
+        
+        # Return the top 6 unique suggestions
+        return(suggestions[1:6])
 }
 
 
-# Example usage:
-sentence <- "the stadium of the"
-top_words <- predict_next_word(sentence, unigrams_tbl, bigrams_tbl, trigrams_tbl, fourgrams_tbl, co_occurrence_df)
-print(top_words)
+# Example usage
+sentence <- "He went to the"
+suggestions <- predict_next_word(sentence, unigrams_tbl, bigrams_tbl, bigrams_no_stop_tbl, co_occurrence_df)
+print(suggestions)
+
+## Save data tables
+#set new working directory for app
+setwd("/Users/tacit/Library/CloudStorage/OneDrive-Personal/Training/R_training/Course10/capstone/prediction_app")
+# Save each object as an RDS file with compression
+saveRDS(unigrams_tbl, file = "data/unigrams_tbl.rds", compress = "xz")
+saveRDS(bigrams_tbl, file = "data/bigrams_tbl.rds", compress = "xz")
+saveRDS(bigrams_no_stop_tbl, file = "data/bigrams_no_stop_tbl.rds", compress = "xz")
+saveRDS(co_occurrence_df, file = "data/co_occurrence_df.rds", compress = "xz")
