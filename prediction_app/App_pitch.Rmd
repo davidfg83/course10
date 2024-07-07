@@ -1,0 +1,39 @@
+---
+title: "Next Word Prediction - App Pitch"
+author: "David Fragoso Gonzalez"
+date: "`r Sys.Date()`"
+output: ioslides_presentation
+---
+
+## Background on the Problem
+
+- **Communication Efficiency**: In today's fast-paced digital world, efficient communication is critical.
+- **Typing Assistance**: Predictive text models can significantly enhance typing efficiency by suggesting the next word in real-time.
+- **Business Need**: Implementing a robust next-word prediction model can improve user experience in various applications, such as messaging platforms, email clients, and content creation tools.
+
+## How the Model Works
+
+- **Data Collection**: model was trained on a corpus consisting of sample of text data drawn from three files in english from news, blogs, and twitter (now X)
+- **Preprocessing**: The text data was preprocessed to remove noise and perform lemmatization.
+- **N-gram Model**: The core of our model is based on n-grams (bigrams and trigrams) to predict the next word.
+- **Backoff Strategy**: If no trigram match is found, the model falls back to bigrams, co-occurrence data, and finally unigrams.
+- **User Experience**: Simply type a sentence and click a button (or press enter) and the app predicts the next word.
+
+## Co-occurrence Data Integration
+
+- **Why Co-occurrence Data?**
+  - Helps to improve predictions when specific n-gram matches are not found.
+  - Captures word pairs that frequently appear together, providing better context.
+- **Impact on Model Performance**:
+  - Incorporating co-occurrence data enhances the model’s ability to predict relevant next words, even with limited n-gram matches.
+- **Future Scope**:
+  - Further refine co-occurrence data integration for even better performance.
+
+## Potential Improvements: with more compute power and server storage, we could use
+
+- **More Data**:
+  - Use a larger corpus of text data to train the model, improving its accuracy and robustness.
+- **Higher-Level N-grams**: 
+  - Incorporate higher-level n-grams (e.g., fourgrams, fivegrams) to capture more context and provide better predictions.
+- **Enhanced Context Understanding**: 
+  - Expand the use of co-occurrence data to improve context understanding and suggest more relevant next words.
